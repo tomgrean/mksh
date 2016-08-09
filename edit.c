@@ -3551,10 +3551,14 @@ bind_action(int action)
 	case BIND_KEY_UP:
 	case BIND_KEY_PGUP:
 		vi_cmd(1, "k");
+		if (insert)
+			es->cursor = domove(1, "$", 1);
 		break;
 	case BIND_KEY_DOWN:
 	case BIND_KEY_PGDN:
 		vi_cmd(1, "j");
+		if (insert)
+			es->cursor = domove(1, "$", 1);
 		break;
 	case BIND_KEY_RIGHT:
 		es->cursor = domove(1, "l", 1);
