@@ -7,3 +7,5 @@ My TODO list is mainly focused on edit.c, which includes:
 
 1. vi-editing mode with ARROW keys etc.
 2. tab-completion with extra configuration file.
+
+Post-note: If you are interested in tab-completion, please refer to my https://github.com/tomgrean/pdksh project.
