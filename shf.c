@@ -2,7 +2,7 @@
 
 /*-
  * Copyright (c) 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2011,
- *		 2012, 2013, 2015, 2016
+ *		 2012, 2013, 2015, 2016, 2017
  *	mirabilos <m@mirbsd.org>
  *
  * Provided that these terms and disclaimer and all copyright notices
@@ -25,7 +25,7 @@
 
 #include "sh.h"
 
-__RCSID("$MirOS: src/bin/mksh/shf.c,v 1.76 2016/07/25 00:04:47 tg Exp $");
+__RCSID("$MirOS: src/bin/mksh/shf.c,v 1.89 2017/04/28 04:13:19 tg Exp $");
 
 /* flags to shf_emptybuf() */
 #define EB_READSW	0x01	/* about to switch to reading */
@@ -289,29 +289,31 @@ shf_sclose(struct shf *shf)
 int
 shf_flush(struct shf *shf)
 {
+	int rv = 0;
+
 	if (shf->flags & SHF_STRING)
-		return ((shf->flags & SHF_WR) ? -1 : 0);
-
-	if (shf->fd < 0)
+		rv = (shf->flags & SHF_WR) ? -1 : 0;
+	else if (shf->fd < 0)
 		internal_errorf(Tf_sD_s, "shf_flush", "no fd");
-
-	if (shf->flags & SHF_ERROR) {
+	else if (shf->flags & SHF_ERROR) {
 		errno = shf->errnosv;
-		return (-1);
-	}
-
-	if (shf->flags & SHF_READING) {
+		rv = -1;
+	} else if (shf->flags & SHF_READING) {
 		shf->flags &= ~(SHF_EOF | SHF_READING);
 		if (shf->rnleft > 0) {
-			lseek(shf->fd, (off_t)-shf->rnleft, SEEK_CUR);
+			if (lseek(shf->fd, (off_t)-shf->rnleft,
+			    SEEK_CUR) == -1) {
+				shf->flags |= SHF_ERROR;
+				shf->errnosv = errno;
+				rv = -1;
+			}
 			shf->rnleft = 0;
 			shf->rp = shf->buf;
 		}
-		return (0);
 	} else if (shf->flags & SHF_WRITING)
-		return (shf_emptybuf(shf, 0));
+		rv = shf_emptybuf(shf, 0);
 
-	return (0);
+	return (rv);
 }
 
 /*
@@ -518,7 +520,23 @@ shf_getse(char *buf, ssize_t bsize, struct shf *shf)
 		shf->rnleft -= ncopy;
 		buf += ncopy;
 		bsize -= ncopy;
+#ifdef MKSH_WITH_TEXTMODE
+		if (end && buf > orig_buf + 1 && buf[-2] == '\r') {
+			buf--;
+			bsize++;
+			buf[-1] = '\n';
+		}
+#endif
 	} while (!end && bsize);
+#ifdef MKSH_WITH_TEXTMODE
+	if (!bsize && buf[-1] == '\r') {
+		int c = shf_getc(shf);
+		if (c == '\n')
+			buf[-1] = '\n';
+		else if (c != -1)
+			shf_ungetc(c, shf);
+	}
+#endif
 	*buf = '\0';
 	return (buf);
 }
@@ -856,11 +874,11 @@ shf_vfprintf(struct shf *shf, const char *fmt, va_list args)
 				flags |= FL_SIZET;
 				continue;
 			}
-			if (ksh_isdigit(c)) {
+			if (ctype(c, C_DIGIT)) {
 				bool overflowed = false;
 
 				tmp = ksh_numdig(c);
-				while (c = *fmt++, ksh_isdigit(c))
+				while (ctype((c = *fmt++), C_DIGIT))
 					if (notok2mul(2147483647, tmp, 10))
 						overflowed = true;
 					else
@@ -881,7 +899,7 @@ shf_vfprintf(struct shf *shf, const char *fmt, va_list args)
 			/* nasty format */
 			break;
 
-		if (ksh_isupper(c)) {
+		if (ctype(c, C_UPPER)) {
 			flags |= FL_UPPER;
 			c = ksh_tolower(c);
 		}
@@ -1011,8 +1029,7 @@ shf_vfprintf(struct shf *shf, const char *fmt, va_list args)
 			if (!(flags & FL_RIGHT)) {
 				/* skip past sign or 0x when padding with 0 */
 				if ((flags & FL_ZERO) && (flags & FL_NUMBER)) {
-					if (*s == '+' || *s == '-' ||
-					    *s == ' ') {
+					if (ctype(*s, C_SPC | C_PLUS | C_MINUS)) {
 						shf_putc(*s, shf);
 						s++;
 						precision--;
@@ -1138,5 +1155,104 @@ cstrerror(int errnum)
 		    "Unknown error: %d", errnum);
 		return (errbuf);
 	}
+}
+#endif
+
+/* fast character classes */
+const uint32_t tpl_ctypes[128] = {
+	/* 0x00 */
+	CiNUL,		CiCNTRL,	CiCNTRL,	CiCNTRL,
+	CiCNTRL,	CiCNTRL,	CiCNTRL,	CiCNTRL,
+	CiCNTRL,	CiTAB,		CiNL,		CiSPX,
+	CiSPX,		CiCR,		CiCNTRL,	CiCNTRL,
+	/* 0x10 */
+	CiCNTRL,	CiCNTRL,	CiCNTRL,	CiCNTRL,
+	CiCNTRL,	CiCNTRL,	CiCNTRL,	CiCNTRL,
+	CiCNTRL,	CiCNTRL,	CiCNTRL,	CiCNTRL,
+	CiCNTRL,	CiCNTRL,	CiCNTRL,	CiCNTRL,
+	/* 0x20 */
+	CiSP,		CiALIAS | CiVAR1,	CiQC,	CiHASH,
+	CiSS,		CiPERCT,	CiQCL,		CiQC,
+	CiQCL,		CiQCL,		CiQCX | CiVAR1,	CiPLUS,
+	CiALIAS,	CiMINUS,	CiALIAS,	CiQCM,
+	/* 0x30 */
+	CiOCTAL,	CiOCTAL,	CiOCTAL,	CiOCTAL,
+	CiOCTAL,	CiOCTAL,	CiOCTAL,	CiOCTAL,
+	CiDIGIT,	CiDIGIT,	CiCOLON,	CiQCL,
+	CiANGLE,	CiEQUAL,	CiANGLE,	CiQUEST,
+	/* 0x40 */
+	CiALIAS | CiVAR1,	CiUPPER | CiHEXLT,
+	CiUPPER | CiHEXLT,	CiUPPER | CiHEXLT,
+	CiUPPER | CiHEXLT,	CiUPPER | CiHEXLT,
+	CiUPPER | CiHEXLT,	CiUPPER,
+	CiUPPER,	CiUPPER,	CiUPPER,	CiUPPER,
+	CiUPPER,	CiUPPER,	CiUPPER,	CiUPPER,
+	/* 0x50 */
+	CiUPPER,	CiUPPER,	CiUPPER,	CiUPPER,
+	CiUPPER,	CiUPPER,	CiUPPER,	CiUPPER,
+	CiUPPER,	CiUPPER,	CiUPPER,	CiQCX | CiBRACK,
+	CiQCX,		CiBRACK,	CiQCM,		CiUNDER,
+	/* 0x60 */
+	CiGRAVE,		CiLOWER | CiHEXLT,
+	CiLOWER | CiHEXLT,	CiLOWER | CiHEXLT,
+	CiLOWER | CiHEXLT,	CiLOWER | CiHEXLT,
+	CiLOWER | CiHEXLT,	CiLOWER,
+	CiLOWER,	CiLOWER,	CiLOWER,	CiLOWER,
+	CiLOWER,	CiLOWER,	CiLOWER,	CiLOWER,
+	/* 0x70 */
+	CiLOWER,	CiLOWER,	CiLOWER,	CiLOWER,
+	CiLOWER,	CiLOWER,	CiLOWER,	CiLOWER,
+	CiLOWER,	CiLOWER,	CiLOWER,	CiCURLY,
+	CiQCL,		CiCURLY,	CiQCM,		CiCNTRL
+};
+
+void
+set_ifs(const char *s)
+{
+	ifs0 = *s;
+	memcpy(ksh_ctypes, tpl_ctypes, sizeof(tpl_ctypes));
+	memset((char *)ksh_ctypes + sizeof(tpl_ctypes), '\0',
+	    sizeof(ksh_ctypes) - sizeof(tpl_ctypes));
+	while (*s)
+		ksh_ctypes[rtt2asc(*s++)] |= CiIFS;
+}
+
+#ifdef MKSH_EBCDIC
+#include <locale.h>
+
+void
+ebcdic_init(void)
+{
+	int i = 256;
+	unsigned char t;
+
+	while (i--)
+		ebcdic_rtt_toascii[i] = i;
+	setlocale(LC_ALL, "");
+	if (__etoa_l(ebcdic_rtt_toascii, 256) != 256) {
+		write(2, "mksh: could not map EBCDIC to ASCII\n", 36);
+		exit(255);
+	}
+
+	i = 0;
+	do {
+		/* fill the complete round-trip map */
+		ebcdic_rtt_fromascii[ebcdic_rtt_toascii[i]] = i;
+		/*
+		 * Only use the converted value if it's in the range
+		 * [0x00; 0x7F], which I checked; the "extended ASCII"
+		 * characters can be any encoding, not just Latin1,
+		 * and the C1 control characters other than NEL are
+		 * hopeless, but we map EBCDIC NEL to ASCII LF so we
+		 * cannot even use C1 NEL.
+		 * If ever we map to Unicode, bump the table width to
+		 * an unsigned int, and or the raw unconverted EBCDIC
+		 * values with 0x01000000 instead.
+		 */
+		if ((t = ebcdic_rtt_toascii[i]) < 0x80U)
+			ebcdic_map[i] = (unsigned short)ord(t);
+		else
+			ebcdic_map[i] = (unsigned short)(0x100U | ord(i));
+	} while (++i < 256);
 }
 #endif

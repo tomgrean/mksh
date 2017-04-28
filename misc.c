@@ -3,8 +3,10 @@
 
 /*-
  * Copyright (c) 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010,
- *		 2011, 2012, 2013, 2014, 2015, 2016
+ *		 2011, 2012, 2013, 2014, 2015, 2016, 2017
  *	mirabilos <m@mirbsd.org>
+ * Copyright (c) 2015
+ *	Daniel Richard G. <skunk@iSKUNK.ORG>
  *
  * Provided that these terms and disclaimer and all copyright notices
  * are retained or reproduced in an accompanying document, permission
@@ -30,7 +32,7 @@
 #include <grp.h>
 #endif
 
-__RCSID("$MirOS: src/bin/mksh/misc.c,v 1.244 2016/07/25 20:36:28 tg Exp $");
+__RCSID("$MirOS: src/bin/mksh/misc.c,v 1.268 2017/04/28 03:46:49 tg Exp $");
 
 #define KSH_CHVT_FLAG
 #ifdef MKSH_SMALL
@@ -39,10 +41,6 @@ __RCSID("$MirOS: src/bin/mksh/misc.c,v 1.244 2016/07/25 20:36:28 tg Exp $");
 #ifdef TIOCSCTTY
 #define KSH_CHVT_CODE
 #define KSH_CHVT_FLAG
-#endif
-#ifdef MKSH_LEGACY_MODE
-#undef KSH_CHVT_CODE
-#undef KSH_CHVT_FLAG
 #endif
 
 /* type bits for unsigned char */
@@ -72,38 +70,6 @@ static int make_path(const char *, const char *, char **, XString *, int *);
 #define DO_SETUID(func, argvec) func argvec
 #endif
 
-/*
- * Fast character classes
- */
-void
-setctypes(const char *s, int t)
-{
-	unsigned int i;
-
-	if (t & C_IFS) {
-		for (i = 0; i < UCHAR_MAX + 1; i++)
-			chtypes[i] &= ~C_IFS;
-		/* include \0 in C_IFS */
-		chtypes[0] |= C_IFS;
-	}
-	while (*s != 0)
-		chtypes[(unsigned char)*s++] |= t;
-}
-
-void
-initctypes(void)
-{
-	setctypes(letters_uc, C_ALPHA);
-	setctypes(letters_lc, C_ALPHA);
-	chtypes['_'] |= C_ALPHA;
-	setctypes("0123456789", C_DIGIT);
-	/* \0 added automatically */
-	setctypes(TC_LEX1, C_LEX1);
-	setctypes("*@#!$-?", C_VAR1);
-	setctypes(TC_IFSWS, C_IFSWS);
-	setctypes("=-+?", C_SUBOP1);
-	setctypes("\t\n \"#$&'()*;<=>?[\\]`|", C_QUOTE);
-}
 
 /* called from XcheckN() to grow buffer */
 char *
@@ -152,7 +118,7 @@ option(const char *n)
 {
 	size_t i = 0;
 
-	if ((n[0] == '-' || n[0] == '+') && n[1] && !n[2])
+	if (ctype(n[0], C_MINUS | C_PLUS) && n[1] && !n[2])
 		while (i < NELEM(options)) {
 			if (OFC(i) == n[1])
 				return (i);
@@ -195,6 +161,7 @@ printoptions(bool verbose)
 	if (verbose) {
 		size_t n = 0, len, octs = 0;
 		struct options_info oi;
+		struct columnise_opts co;
 
 		/* verbose version */
 		shf_puts("Current option settings\n", shl_stdout);
@@ -211,8 +178,11 @@ printoptions(bool verbose)
 			}
 			++i;
 		}
-		print_columns(shl_stdout, n, options_fmt_entry, &oi,
-		    octs + 4, oi.opt_width + 4, true);
+		co.shf = shl_stdout;
+		co.linesep = '\n';
+		co.prefcol = co.do_last = true;
+		print_columns(&co, n, options_fmt_entry, &oi,
+		    octs + 4, oi.opt_width + 4);
 	} else {
 		/* short version like AT&T ksh93 */
 		shf_puts(Tset, shl_stdout);
@@ -387,7 +357,7 @@ parse_args(const char **argv,
 		 */
 		if (*p != '-')
 			for (q = p; *q; )
-				if (*q++ == '/')
+				if (mksh_cdirsep(*q++))
 					p = q;
 		Flag(FLOGIN) = (*p == '-');
 		opts = cmd_opts;
@@ -484,7 +454,7 @@ parse_args(const char **argv,
 		}
 	}
 	if (!(go.info & GI_MINUSMINUS) && argv[go.optind] &&
-	    (argv[go.optind][0] == '-' || argv[go.optind][0] == '+') &&
+	    ctype(argv[go.optind][0], C_MINUS | C_PLUS) &&
 	    argv[go.optind][1] == '\0') {
 		/* lone - clears -v and -x flags */
 		if (argv[go.optind][0] == '-') {
@@ -502,7 +472,7 @@ parse_args(const char **argv,
 	if (arrayset) {
 		const char *ccp = NULL;
 
-		if (*array)
+		if (array && *array)
 			ccp = skip_varname(array, false);
 		if (!ccp || !(!ccp[0] || (ccp[0] == '+' && !ccp[1]))) {
 			bi_errorf(Tf_sD_s, array, Tnot_ident);
@@ -513,7 +483,7 @@ parse_args(const char **argv,
 		for (i = go.optind; argv[i]; i++)
 			;
 		qsort(&argv[go.optind], i - go.optind, sizeof(void *),
-		    xstrcmp);
+		    ascpstrcmp);
 	}
 	if (arrayset)
 		go.optind += set_array(array, tobool(arrayset > 0),
@@ -534,7 +504,7 @@ getn(const char *s, int *ai)
 
 	do {
 		c = *s++;
-	} while (ksh_isspace(c));
+	} while (ctype(c, C_SPACE));
 
 	switch (c) {
 	case '-':
@@ -546,7 +516,7 @@ getn(const char *s, int *ai)
 	}
 
 	do {
-		if (!ksh_isdigit(c))
+		if (!ctype(c, C_DIGIT))
 			/* not numeric */
 			return (0);
 		if (num.u > 214748364U)
@@ -662,7 +632,7 @@ gmatchx(const char *s, const char *p, bool isfile)
 	pe = p + strlen(p);
 	/*
 	 * isfile is false iff no syntax check has been done on
-	 * the pattern. If check fails, just to a strcmp().
+	 * the pattern. If check fails, just do a strcmp().
 	 */
 	if (!isfile && !has_globbing(p, pe)) {
 		size_t len = pe - p + 1;
@@ -735,7 +705,7 @@ has_globbing(const char *xp, const char *xpe)
 					return (0);
 				in_bracket = false;
 			}
-		} else if ((c & 0x80) && vstrchr("*+?@! ", c & 0x7f)) {
+		} else if ((c & 0x80) && ctype(c & 0x7F, C_PATMO | C_SPC)) {
 			saw_glob = true;
 			if (in_bracket)
 				bnest++;
@@ -753,10 +723,7 @@ has_globbing(const char *xp, const char *xpe)
 			} else if (nest)
 				nest--;
 		}
-		/*
-		 * else must be a MAGIC-MAGIC, or MAGIC-!,
-		 * MAGIC--, MAGIC-], MAGIC-{, MAGIC-, MAGIC-}
-		 */
+		/* else must be MAGIC followed by MAGIC or one of: ]{},!- */
 	}
 	return (saw_glob && !in_bracket && !nest);
 }
@@ -954,16 +921,30 @@ pat_scan(const unsigned char *p, const unsigned char *pe, bool match_sep)
 		if ((*++p == /*(*/ ')' && nest-- == 0) ||
 		    (*p == '|' && match_sep && nest == 0))
 			return (p + 1);
-		if ((*p & 0x80) && vstrchr("*+?@! ", *p & 0x7f))
+		if ((*p & 0x80) && ctype(*p & 0x7F, C_PATMO | C_SPC))
 			nest++;
 	}
 	return (NULL);
 }
 
 int
-xstrcmp(const void *p1, const void *p2)
+ascstrcmp(const void *s1, const void *s2)
 {
-	return (strcmp(*(const char * const *)p1, *(const char * const *)p2));
+	const uint8_t *cp1 = s1, *cp2 = s2;
+
+	while (*cp1 == *cp2) {
+		if (*cp1++ == '\0')
+			return (0);
+		++cp2;
+	}
+	return ((int)asciibetical(*cp1) - (int)asciibetical(*cp2));
+}
+
+int
+ascpstrcmp(const void *pstr1, const void *pstr2)
+{
+	return (ascstrcmp(*(const char * const *)pstr1,
+	    *(const char * const *)pstr2));
 }
 
 /* Initialise a Getopt structure */
@@ -1033,7 +1014,7 @@ ksh_getopt(const char **argv, Getopt *go, const char *optionsp)
 		go->info |= flag == '-' ? GI_MINUS : GI_PLUS;
 	}
 	go->p++;
-	if (c == '?' || c == ':' || c == ';' || c == ',' || c == '#' ||
+	if (ctype(c, C_QUEST | C_COLON | C_HASH) || c == ';' || c == ',' ||
 	    !(o = cstrchr(optionsp, c))) {
 		if (optionsp[0] == ':') {
 			go->buf[0] = c;
@@ -1087,13 +1068,14 @@ ksh_getopt(const char **argv, Getopt *go, const char *optionsp)
 		 * argument is missing.
 		 */
 		if (argv[go->optind - 1][go->p]) {
-			if (ksh_isdigit(argv[go->optind - 1][go->p])) {
+			if (ctype(argv[go->optind - 1][go->p], C_DIGIT)) {
 				go->optarg = argv[go->optind - 1] + go->p;
 				go->p = 0;
 			} else
 				go->optarg = NULL;
 		} else {
-			if (argv[go->optind] && ksh_isdigit(argv[go->optind][0])) {
+			if (argv[go->optind] &&
+			    ctype(argv[go->optind][0], C_DIGIT)) {
 				go->optarg = argv[go->optind++];
 				go->p = 0;
 			} else
@@ -1116,8 +1098,8 @@ print_value_quoted(struct shf *shf, const char *s)
 	bool inquote = true;
 
 	/* first, check whether any quotes are needed */
-	while ((c = *p++) >= 32)
-		if (ctype(c, C_QUOTE))
+	while (rtt2asc(c = *p++) >= 32)
+		if (ctype(c, C_QUOTE | C_SPC))
 			inquote = false;
 
 	p = (const unsigned char *)s;
@@ -1155,6 +1137,7 @@ print_value_quoted(struct shf *shf, const char *s)
 		shf_putc('$', shf);
 		shf_putc('\'', shf);
 		while ((c = *p) != 0) {
+#ifndef MKSH_EBCDIC
 			if (c >= 0xC2) {
 				n = utf_mbtowc(&wc, (const char *)p);
 				if (n != (size_t)-1) {
@@ -1163,10 +1146,11 @@ print_value_quoted(struct shf *shf, const char *s)
 					continue;
 				}
 			}
+#endif
 			++p;
 			switch (c) {
 			/* see unbksl() in this file for comments */
-			case 7:
+			case KSH_BEL:
 				c = 'a';
 				if (0)
 					/* FALLTHROUGH */
@@ -1190,11 +1174,11 @@ print_value_quoted(struct shf *shf, const char *s)
 				  c = 't';
 				if (0)
 					/* FALLTHROUGH */
-			case 11:
+			case KSH_VTAB:
 				  c = 'v';
 				if (0)
 					/* FALLTHROUGH */
-			case '\033':
+			case KSH_ESC:
 				/* take E not e because \e is \ in *roff */
 				  c = 'E';
 				/* FALLTHROUGH */
@@ -1204,7 +1188,12 @@ print_value_quoted(struct shf *shf, const char *s)
 				if (0)
 					/* FALLTHROUGH */
 			default:
-				  if (c < 32 || c > 0x7E) {
+#ifdef MKSH_EBCDIC
+				  if (ksh_isctrl(c))
+#else
+				  if (c < 32 || c > 0x7E)
+#endif
+				    {
 					/* FALLTHROUGH */
 			case '\'':
 					shf_fprintf(shf, "\\%03o", c);
@@ -1226,11 +1215,11 @@ print_value_quoted(struct shf *shf, const char *s)
  * the i-th element
  */
 void
-print_columns(struct shf *shf, unsigned int n,
+print_columns(struct columnise_opts *opts, unsigned int n,
     void (*func)(char *, size_t, unsigned int, const void *),
-    const void *arg, size_t max_oct, size_t max_colz, bool prefcol)
+    const void *arg, size_t max_oct, size_t max_colz)
 {
-	unsigned int i, r, c, rows, cols, nspace, max_col;
+	unsigned int i, r = 0, c, rows, cols, nspace, max_col;
 	char *str;
 
 	if (!n)
@@ -1265,16 +1254,18 @@ print_columns(struct shf *shf, unsigned int n,
 
 	/* if we can only print one column anyway, skip the goo */
 	if (cols < 2) {
-		for (i = 0; i < n; ++i) {
-			(*func)(str, max_oct, i, arg);
-			shf_puts(str, shf);
-			shf_putc('\n', shf);
+		goto prcols_easy;
+		while (r < n) {
+			shf_putc(opts->linesep, opts->shf);
+ prcols_easy:
+			(*func)(str, max_oct, r++, arg);
+			shf_puts(str, opts->shf);
 		}
 		goto out;
 	}
 
 	rows = (n + cols - 1) / cols;
-	if (prefcol && cols > rows) {
+	if (opts->prefcol && cols > rows) {
 		cols = rows;
 		rows = (n + cols - 1) / cols;
 	}
@@ -1283,20 +1274,25 @@ print_columns(struct shf *shf, unsigned int n,
 	if (nspace < 2)
 		nspace = 2;
 	max_col = -max_col;
-	for (r = 0; r < rows; r++) {
+	goto prcols_hard;
+	while (r < rows) {
+		shf_putchar(opts->linesep, opts->shf);
+ prcols_hard:
 		for (c = 0; c < cols; c++) {
 			if ((i = c * rows + r) >= n)
 				break;
 			(*func)(str, max_oct, i, arg);
 			if (i + rows >= n)
-				shf_puts(str, shf);
+				shf_puts(str, opts->shf);
 			else
-				shf_fprintf(shf, "%*s%*s",
+				shf_fprintf(opts->shf, "%*s%*s",
 				    (int)max_col, str, (int)nspace, null);
 		}
-		shf_putchar('\n', shf);
+		++r;
 	}
  out:
+	if (opts->do_last)
+		shf_putchar(opts->linesep, opts->shf);
 	afree(str, ATEMP);
 }
 
@@ -1432,14 +1428,14 @@ do_realpath(const char *upath)
 
 	while (*ip) {
 		/* skip slashes in input */
-		while (*ip == '/')
+		while (mksh_cdirsep(*ip))
 			++ip;
 		if (!*ip)
 			break;
 
 		/* get next pathname component from input */
 		tp = ip;
-		while (*ip && *ip != '/')
+		while (*ip && !mksh_cdirsep(*ip))
 			++ip;
 		len = ip - tp;
 
@@ -1451,7 +1447,7 @@ do_realpath(const char *upath)
 			else if (len == 2 && tp[1] == '.') {
 				/* strip off last pathname component */
 				while (xp > Xstring(xs, xp))
-					if (*--xp == '/')
+					if (mksh_cdirsep(*--xp))
 						break;
 				/* then continue with the next one */
 				continue;
@@ -1474,7 +1470,7 @@ do_realpath(const char *upath)
 			/* lstat failed */
 			if (errno == ENOENT) {
 				/* because the pathname does not exist */
-				while (*ip == '/')
+				while (mksh_cdirsep(*ip))
 					/* skip any trailing slashes */
 					++ip;
 				/* no more components left? */
@@ -1530,11 +1526,11 @@ do_realpath(const char *upath)
 				/* symlink target is an absolute path */
 				xp = Xstring(xs, xp);
  beginning_of_a_pathname:
-				/* assert: (ip == ipath)[0] == '/' */
+				/* assert: mksh_cdirsep((ip == ipath)[0]) */
 				/* assert: xp == xs.beg => start of path */
 
 				/* exactly two leading slashes? (SUSv4 3.266) */
-				if (ip[1] == '/' && ip[2] != '/') {
+				if (ip[1] == ip[0] && !mksh_cdirsep(ip[2])) {
 					/* keep them, e.g. for UNC pathnames */
 					Xput(xs, xp, '/');
 				}
@@ -1559,7 +1555,7 @@ do_realpath(const char *upath)
 	 * if source path had a trailing slash, check if target path
 	 * is not a non-directory existing file
 	 */
-	if (ip > ipath && ip[-1] == '/') {
+	if (ip > ipath && mksh_cdirsep(ip[-1])) {
 		if (stat(Xstring(xs, xp), &sb)) {
 			if (errno != ENOENT)
 				goto notfound;
@@ -1628,7 +1624,7 @@ make_path(const char *cwd, const char *file,
 
 			if (c == '.')
 				c = file[2];
-			if (c == '/' || c == '\0')
+			if (mksh_cdirsep(c) || c == '\0')
 				use_cdpath = false;
 		}
 
@@ -1650,7 +1646,7 @@ make_path(const char *cwd, const char *file,
 			XcheckN(*xsp, xp, len);
 			memcpy(xp, cwd, len);
 			xp += len;
-			if (cwd[len - 1] != '/')
+			if (!mksh_cdirsep(cwd[len - 1]))
 				Xput(*xsp, xp, '/');
 		}
 		*phys_pathp = Xlength(*xsp, xp);
@@ -1658,7 +1654,7 @@ make_path(const char *cwd, const char *file,
 			XcheckN(*xsp, xp, plen);
 			memcpy(xp, plist, plen);
 			xp += plen;
-			if (plist[plen - 1] != '/')
+			if (!mksh_cdirsep(plist[plen - 1]))
 				Xput(*xsp, xp, '/');
 			rval = 1;
 		}
@@ -1699,8 +1695,11 @@ simplify_path(char *p)
 	case 0:
 		return;
 	case '/':
+#ifdef MKSH_DOSPATH
+	case '\\':
+#endif
 		/* exactly two leading slashes? (SUSv4 3.266) */
-		if (p[1] == '/' && p[2] != '/')
+		if (p[1] == p[0] && !mksh_cdirsep(p[2]))
 			/* keep them, e.g. for UNC pathnames */
 			++p;
 		needslash = true;
@@ -1712,14 +1711,14 @@ simplify_path(char *p)
 
 	while (*ip) {
 		/* skip slashes in input */
-		while (*ip == '/')
+		while (mksh_cdirsep(*ip))
 			++ip;
 		if (!*ip)
 			break;
 
 		/* get next pathname component from input */
 		tp = ip;
-		while (*ip && *ip != '/')
+		while (*ip && !mksh_cdirsep(*ip))
 			++ip;
 		len = ip - tp;
 
@@ -1739,7 +1738,7 @@ simplify_path(char *p)
  strip_last_component:
 					/* strip off last pathname component */
 					while (dp > sp)
-						if (*--dp == '/')
+						if (mksh_cdirsep(*--dp))
 							break;
 				} else {
 					/* relative path, at its beginning */
@@ -2140,18 +2139,12 @@ getrusage(int what, struct rusage *ru)
 int
 unbksl(bool cstyle, int (*fg)(void), void (*fp)(int))
 {
-	int wc, i, c, fc;
+	int wc, i, c, fc, n;
 
 	fc = (*fg)();
 	switch (fc) {
 	case 'a':
-		/*
-		 * according to the comments in pdksh, \007 seems
-		 * to be more portable than \a (due to HP-UX cc,
-		 * Ultrix cc, old pcc, etc.) so we avoid the escape
-		 * sequence altogether in mksh and assume ASCII
-		 */
-		wc = 7;
+		wc = KSH_BEL;
 		break;
 	case 'b':
 		wc = '\b';
@@ -2160,11 +2153,11 @@ unbksl(bool cstyle, int (*fg)(void), void (*fp)(int))
 		if (!cstyle)
 			goto unknown_escape;
 		c = (*fg)();
-		wc = CTRL(c);
+		wc = ksh_toctrl(c);
 		break;
 	case 'E':
 	case 'e':
-		wc = 033;
+		wc = KSH_ESC;
 		break;
 	case 'f':
 		wc = '\f';
@@ -2179,8 +2172,7 @@ unbksl(bool cstyle, int (*fg)(void), void (*fp)(int))
 		wc = '\t';
 		break;
 	case 'v':
-		/* assume ASCII here as well */
-		wc = 11;
+		wc = KSH_VTAB;
 		break;
 	case '1':
 	case '2':
@@ -2203,7 +2195,7 @@ unbksl(bool cstyle, int (*fg)(void), void (*fp)(int))
 		wc = 0;
 		i = 3;
 		while (i--)
-			if ((c = (*fg)()) >= ord('0') && c <= ord('7'))
+			if (ctype((c = (*fg)()), C_OCTAL))
 				wc = (wc << 3) + ksh_numdig(c);
 			else {
 				(*fp)(c);
@@ -2228,20 +2220,24 @@ unbksl(bool cstyle, int (*fg)(void), void (*fp)(int))
 		 *	four (U: eight) digits; convert to Unicode
 		 */
 		wc = 0;
-		while (i--) {
+		n = 0;
+		while (n < i || i == -1) {
 			wc <<= 4;
-			if ((c = (*fg)()) >= ord('0') && c <= ord('9'))
-				wc += ksh_numdig(c);
-			else if (c >= ord('A') && c <= ord('F'))
-				wc += ksh_numuc(c) + 10;
-			else if (c >= ord('a') && c <= ord('f'))
-				wc += ksh_numlc(c) + 10;
-			else {
+			if (!ctype((c = (*fg)()), C_SEDEC)) {
 				wc >>= 4;
 				(*fp)(c);
 				break;
 			}
+			if (ctype(c, C_DIGIT))
+				wc += ksh_numdig(c);
+			else if (ctype(c, C_UPPER))
+				wc += ksh_numuc(c) + 10;
+			else
+				wc += ksh_numlc(c) + 10;
+			++n;
 		}
+		if (!n)
+			goto unknown_escape;
 		if ((cstyle && wc > 0xFF) || fc != 'x')
 			/* Unicode marker */
 			wc += 0x100;

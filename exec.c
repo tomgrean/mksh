@@ -2,7 +2,7 @@
 
 /*-
  * Copyright (c) 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010,
- *		 2011, 2012, 2013, 2014, 2015, 2016
+ *		 2011, 2012, 2013, 2014, 2015, 2016, 2017
  *	mirabilos <m@mirbsd.org>
  *
  * Provided that these terms and disclaimer and all copyright notices
@@ -23,7 +23,7 @@
 
 #include "sh.h"
 
-__RCSID("$MirOS: src/bin/mksh/exec.c,v 1.178 2016/07/25 00:04:41 tg Exp $");
+__RCSID("$MirOS: src/bin/mksh/exec.c,v 1.197 2017/04/28 00:38:29 tg Exp $");
 
 #ifndef MKSH_DEFAULT_EXECSHELL
 #define MKSH_DEFAULT_EXECSHELL	MKSH_UNIXROOT "/bin/sh"
@@ -282,7 +282,7 @@ execute(struct op * volatile t,
 
 	case TOR:
 	case TAND:
-		rv = execute(t->left, XERROK, xerrok);
+		rv = execute(t->left, XERROK, NULL);
 		if ((rv == 0) == (t->type == TAND))
 			rv = execute(t->right, flags & XERROK, xerrok);
 		else {
@@ -339,16 +339,14 @@ execute(struct op * volatile t,
 				rv = execute(t->left, flags & XERROK, xerrok);
 			}
 		} else {
-			/* TSELECT */
-			for (;;) {
-				if (!(ccp = do_selectargs(ap, is_first))) {
-					rv = 1;
-					break;
-				}
+ do_TSELECT:
+			if ((ccp = do_selectargs(ap, is_first))) {
 				is_first = false;
 				setstr(global(t->str), ccp, KSH_UNWIND_ERROR);
 				execute(t->left, flags & XERROK, xerrok);
+				goto do_TSELECT;
 			}
+			rv = 1;
 		}
 		break;
 	}
@@ -378,9 +376,8 @@ execute(struct op * volatile t,
 		if (t->right == NULL)
 			/* should be error */
 			break;
-		rv = execute(t->left, XERROK, NULL) == 0 ?
-		    execute(t->right->left, flags & XERROK, xerrok) :
-		    execute(t->right->right, flags & XERROK, xerrok);
+		rv = execute(execute(t->left, XERROK, NULL) == 0 ?
+		    t->right->left : t->right->right, flags & XERROK, xerrok);
 		break;
 
 	case TCASE:
@@ -390,6 +387,7 @@ execute(struct op * volatile t,
 			for (ap = (const char **)t->vars; *ap; ap++) {
 				if (i || ((s = evalstr(*ap, DOTILDE|DOPAT)) &&
 				    gmatchx(ccp, s, false))) {
+					record_match(ccp);
 					rv = execute(t->left, flags & XERROK,
 					    xerrok);
 					i = 0;
@@ -673,7 +671,7 @@ comexec(struct op *t, struct tbl * volatile tp, const char **ap,
 		rv = subst_exstat;
 		goto Leave;
 	} else if (!tp) {
-		if (Flag(FRESTRICTED) && vstrchr(cp, '/')) {
+		if (Flag(FRESTRICTED) && mksh_vdirsep(cp)) {
 			warningf(true, Tf_sD_s, cp, "restricted");
 			rv = 1;
 			goto Leave;
@@ -807,7 +805,7 @@ comexec(struct op *t, struct tbl * volatile tp, const char **ap,
 			/* NOTREACHED */
 		default:
 			quitenv(NULL);
-			internal_errorf(Tf_sd, "CFUNC", i);
+			internal_errorf(Tunexpected_type, Tunwind, Tfunction, i);
 		}
 		break;
 	}
@@ -887,9 +885,14 @@ scriptexec(struct op *tp, const char **ap)
 #ifndef MKSH_SMALL
 	if ((fd = binopen2(tp->str, O_RDONLY)) >= 0) {
 		unsigned char *cp;
+#ifndef MKSH_EBCDIC
 		unsigned short m;
+#endif
 		ssize_t n;
 
+#if defined(__OS2__) && defined(MKSH_WITH_TEXTMODE)
+		setmode(fd, O_TEXT);
+#endif
 		/* read first couple of octets from file */
 		n = read(fd, buf, sizeof(buf) - 1);
 		close(fd);
@@ -904,7 +907,7 @@ scriptexec(struct op *tp, const char **ap)
 		    (buf[2] == 0xBF)) ? 3 : 0);
 
 		/* scan for newline or NUL (end of buffer) */
-		while (*cp && *cp != '\n')
+		while (!ctype(*cp, C_NL | C_NUL))
 			++cp;
 		/* if the shebang line is longer than MAXINTERP, bail out */
 		if (!*cp)
@@ -912,20 +915,20 @@ scriptexec(struct op *tp, const char **ap)
 		/* replace newline by NUL */
 		*cp = '\0';
 
-		/* restore begin of shebang position (buf+0 or buf+3) */
+		/* restore start of shebang position (buf+0 or buf+3) */
 		cp = buf + n;
 		/* bail out if no shebang magic found */
 		if (cp[0] == '#' && cp[1] == '!')
 			cp += 2;
 #ifdef __OS2__
 		else if (!strncmp(cp, Textproc, 7) &&
-		    (cp[7] == ' ' || cp[7] == '\t'))
+		    ctype(cp[7], C_BLANK))
 			cp += 8;
 #endif
 		else
 			goto noshebang;
 		/* skip whitespace before shell name */
-		while (*cp == ' ' || *cp == '\t')
+		while (ctype(*cp, C_BLANK))
 			++cp;
 		/* just whitespace on the line? */
 		if (*cp == '\0')
@@ -933,20 +936,32 @@ scriptexec(struct op *tp, const char **ap)
 		/* no, we actually found an interpreter name */
 		sh = (char *)cp;
 		/* look for end of shell/interpreter name */
-		while (*cp != ' ' && *cp != '\t' && *cp != '\0')
+		while (!ctype(*cp, C_BLANK | C_NUL))
 			++cp;
 		/* any arguments? */
 		if (*cp) {
 			*cp++ = '\0';
 			/* skip spaces before arguments */
-			while (*cp == ' ' || *cp == '\t')
+			while (ctype(*cp, C_BLANK))
 				++cp;
 			/* pass it all in ONE argument (historic reasons) */
 			if (*cp)
 				*tp->args-- = (char *)cp;
 		}
+#ifdef __OS2__
+		/*
+		 * Search shell/interpreter name without directory in PATH
+		 * if specified path does not exist
+		 */
+		if (mksh_vdirsep(sh) && !search_path(sh, path, X_OK, NULL)) {
+			cp = search_path(_getname(sh), path, X_OK, NULL);
+			if (cp)
+				sh = cp;
+		}
+#endif
 		goto nomagic;
  noshebang:
+#ifndef MKSH_EBCDIC
 		m = buf[0] << 8 | buf[1];
 		if (m == 0x7F45 && buf[2] == 'L' && buf[3] == 'F')
 			errorf("%s: not executable: %d-bit ELF file", tp->str,
@@ -965,6 +980,20 @@ scriptexec(struct op *tp, const char **ap)
 		    buf[4] == 'Z') || (m == /* 7zip */ 0x377A) ||
 		    (m == /* gzip */ 0x1F8B) || (m == /* .Z */ 0x1F9D))
 			errorf("%s: not executable: magic %04X", tp->str, m);
+#endif
+#ifdef __OS2__
+		cp = _getext(tp->str);
+		if (cp && (!stricmp(cp, ".cmd") || !stricmp(cp, ".bat"))) {
+			/* execute .cmd and .bat with OS2_SHELL, usually CMD.EXE */
+			sh = str_val(global("OS2_SHELL"));
+			*tp->args-- = "/c";
+			/* convert slahes to backslashes */
+			for (cp = tp->str; *cp; cp++) {
+				if (*cp == '/')
+					*cp = '\\';
+			}
+		}
+#endif
  nomagic:
 		;
 	}
@@ -979,13 +1008,17 @@ scriptexec(struct op *tp, const char **ap)
 	errorf(Tf_sD_sD_s, tp->str, sh, cstrerror(errno));
 }
 
+/* actual 'builtin' built-in utility call is handled in comexec() */
 int
-shcomexec(const char **wp)
+c_builtin(const char **wp)
 {
-	struct tbl *tp;
+	return (call_builtin(get_builtin(*wp), wp, Tbuiltin, false));
+}
 
-	tp = ktsearch(&builtins, *wp, hash(*wp));
-	return (call_builtin(tp, wp, "shcomexec", false));
+struct tbl *
+get_builtin(const char *s)
+{
+	return (s && *s ? ktsearch(&builtins, s, hash(s)) : NULL);
 }
 
 /*
@@ -1091,6 +1124,14 @@ builtin(const char *name, int (*func) (const char **))
 		/* external utility overrides built-in utility, with flags */
 		flag |= LOW_BI;
 		break;
+	case '-':
+		/* is declaration utility if argv[1] is one (POSIX: command) */
+		flag |= DECL_FWDR;
+		break;
+	case '^':
+		/* is declaration utility (POSIX: export, readonly) */
+		flag |= DECL_UTIL;
+		break;
 	default:
 		goto flags_seen;
 	}
@@ -1124,7 +1165,11 @@ findcom(const char *name, int flags)
 	char *fpath;
 	union mksh_cchack npath;
 
-	if (vstrchr(name, '/')) {
+	if (mksh_vdirsep(name)
+#ifdef MKSH_DOSPATH
+	    && (strcmp(name, T_builtin) != 0)
+#endif
+	    ) {
 		insert = 0;
 		/* prevent FPATH search below */
 		flags &= ~FC_FUNC;
@@ -1241,12 +1286,23 @@ search_access(const char *fn, int mode)
 		eno = errno;
 		return (eno ? eno : EACCES);
 	}
+#ifdef __OS2__
+	/* treat all files as executable on OS/2 */
+	sb.st_mode |= S_IXUSR | S_IXGRP | S_IXOTH;
+#endif
 	if (mode == X_OK && (!S_ISREG(sb.st_mode) ||
-	    !(sb.st_mode & (S_IXUSR|S_IXGRP|S_IXOTH))))
+	    !(sb.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))))
 		/* access(2) may say root can execute everything */
 		return (S_ISDIR(sb.st_mode) ? EISDIR : EACCES);
 	return (0);
 }
+
+#ifdef __OS2__
+/* check if path is something we want to find, adding executable extensions */
+#define search_access(fn, mode)	access_ex((search_access), (fn), (mode))
+#else
+#define search_access(fn, mode)	(search_access)((fn), (mode))
+#endif
 
 /*
  * search for command with PATH
@@ -1264,12 +1320,16 @@ search_path(const char *name, const char *lpath,
 	size_t namelen;
 	int ec = 0, ev;
 
-	if (vstrchr(name, '/')) {
+	if (mksh_vdirsep(name)) {
 		if ((ec = search_access(name, mode)) == 0) {
  search_path_ok:
 			if (errnop)
 				*errnop = 0;
+#ifndef __OS2__
 			return (name);
+#else
+			return (real_exec_name(name));
+#endif
 		}
 		goto search_path_err;
 	}
@@ -1286,6 +1346,10 @@ search_path(const char *name, const char *lpath,
 			XcheckN(xs, xp, p - sp);
 			memcpy(xp, sp, p - sp);
 			xp += p - sp;
+#ifdef __OS2__
+			if (xp > Xstring(xs, xp) && mksh_cdirsep(xp[-1]))
+				xp--;
+#endif
 			*xp++ = '/';
 		}
 		sp = p;
@@ -1316,9 +1380,7 @@ call_builtin(struct tbl *tp, const char **wp, const char *where, bool resetspec)
 	if (!tp)
 		internal_errorf(Tf_sD_s, where, wp[0]);
 	builtin_argv0 = wp[0];
-	builtin_spec = tobool(!resetspec &&
-	    /*XXX odd use of KEEPASN */
-	    ((tp->flag & SPEC_BI) || (Flag(FPOSIX) && (tp->flag & KEEPASN))));
+	builtin_spec = tobool(!resetspec && (tp->flag & SPEC_BI));
 	shf_reopen(1, SHF_WR, shl_stdout);
 	shl_stdout_ok = true;
 	ksh_getopt_reset(&builtin_opt, GF_ERROR);
@@ -1447,8 +1509,11 @@ iosetup(struct ioword *iop, struct tbl *tp)
 		/* herein() may already have printed message */
 		if (u == -1) {
 			u = errno;
-			warningf(true, Tf_cant,
+			warningf(true, Tf_cant_ss_s,
+#if 0
+			    /* can't happen */
 			    iotype == IODUP ? "dup" :
+#endif
 			    (iotype == IOREAD || iotype == IOHERE) ?
 			    Topen : Tcreate, cp, cstrerror(u));
 		}
@@ -1657,6 +1722,7 @@ pr_menu(const char * const *ap)
 	const char * const *pp;
 	size_t acols = 0, aocts = 0, i;
 	unsigned int n;
+	struct columnise_opts co;
 
 	/*
 	 * width/column calculations were done once and saved, but this
@@ -1685,9 +1751,11 @@ pr_menu(const char * const *ap)
 		smi.num_width++;
 
 	smi.args = ap;
-	print_columns(shl_out, n, select_fmt_entry, (void *)&smi,
-	    smi.num_width + 2 + aocts, smi.num_width + 2 + acols,
-	    true);
+	co.shf = shl_out;
+	co.linesep = '\n';
+	co.prefcol = co.do_last = true;
+	print_columns(&co, n, select_fmt_entry, (void *)&smi,
+	    smi.num_width + 2 + aocts, smi.num_width + 2 + acols);
 }
 
 static void
@@ -1697,7 +1765,7 @@ plain_fmt_entry(char *buf, size_t buflen, unsigned int i, const void *arg)
 }
 
 void
-pr_list(char * const *ap)
+pr_list(struct columnise_opts *cop, char * const *ap)
 {
 	size_t acols = 0, aocts = 0, i;
 	unsigned int n;
@@ -1712,8 +1780,8 @@ pr_list(char * const *ap)
 			acols = i;
 	}
 
-	print_columns(shl_out, n, plain_fmt_entry, (const void *)ap,
-	    aocts, acols, false);
+	print_columns(cop, n, plain_fmt_entry, (const void *)ap,
+	    aocts, acols);
 }
 
 /*

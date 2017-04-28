@@ -27,7 +27,7 @@
 #include <sys/file.h>
 #endif
 
-__RCSID("$MirOS: src/bin/mksh/histrap.c,v 1.157 2016/07/25 00:04:43 tg Exp $");
+__RCSID("$MirOS: src/bin/mksh/histrap.c,v 1.161 2017/04/27 19:33:49 tg Exp $");
 
 Trap sigtraps[ksh_NSIG + 1];
 static struct sigaction Sigact_ign;
@@ -308,16 +308,8 @@ c_fc(const char **wp)
 	/* Ignore setstr errors here (arbitrary) */
 	setstr(local("_", false), tf->tffn, KSH_RETURN_ERROR);
 
-	/* XXX: source should not get trashed by this.. */
-	{
-		Source *sold = source;
-		int ret;
-
-		ret = command(editor ? editor : TFCEDIT_dollaru, 0);
-		source = sold;
-		if (ret)
-			return (ret);
-	}
+	if ((optc = command(editor ? editor : TFCEDIT_dollaru, 0)))
+		return (optc);
 
 	{
 		struct stat statb;
@@ -363,8 +355,6 @@ static int
 hist_execute(char *cmd, Area *areap)
 {
 	static int last_line = -1;
-	Source *sold;
-	int ret;
 
 	/* Back up over last histsave */
 	if (histptr >= history && last_line != hist_source->line) {
@@ -388,11 +378,7 @@ hist_execute(char *cmd, Area *areap)
 	 *	X=y fc -e - 42 2> /dev/null
 	 * are to effect the repeated commands environment.
 	 */
-	/* XXX: source should not get trashed by this.. */
-	sold = source;
-	ret = command(cmd, 0);
-	source = sold;
-	return (ret);
+	return (command(cmd, 0));
 }
 
 /*
@@ -843,7 +829,7 @@ hist_init(Source *s)
 			goto retry;
 		}
 		if (hs != hist_init_retry)
-			bi_errorf(Tf_cant,
+			bi_errorf(Tf_cant_ss_s,
 			    "unlink HISTFILE", hname, cstrerror(errno));
 		histfsize = 0;
 		return;
@@ -1047,8 +1033,8 @@ inittraps(void)
 			if (!strcmp(sigtraps[i].name, "EXIT") ||
 			    !strcmp(sigtraps[i].name, "ERR")) {
 #ifndef MKSH_SMALL
-				internal_warningf("ignoring invalid signal name %s",
-				    sigtraps[i].name);
+				internal_warningf(Tinvname, sigtraps[i].name,
+				    "signal");
 #endif
 				sigtraps[i].name = null;
 			}
@@ -1128,7 +1114,7 @@ gettrap(const char *cs, bool igncase, bool allsigs)
 
 	/* signal number (1..ksh_NSIG) or 0? */
 
-	if (ksh_isdigit(*cs))
+	if (ctype(*cs, C_DIGIT))
 		return ((getn(cs, &i) && 0 <= i && i < ksh_NSIG) ?
 		    (&sigtraps[i]) : NULL);
 
@@ -1413,33 +1399,32 @@ settrap(Trap *p, const char *s)
 }
 
 /*
- * Called by c_print() when writing to a co-process to ensure SIGPIPE won't
- * kill shell (unless user catches it and exits)
+ * called by c_print() when writing to a co-process to ensure
+ * SIGPIPE won't kill shell (unless user catches it and exits)
  */
-int
+bool
 block_pipe(void)
 {
-	int restore_dfl = 0;
+	bool restore_dfl = false;
 	Trap *p = &sigtraps[SIGPIPE];
 
 	if (!(p->flags & (TF_ORIG_IGN|TF_ORIG_DFL))) {
 		setsig(p, SIG_IGN, SS_RESTORE_CURR);
 		if (p->flags & TF_ORIG_DFL)
-			restore_dfl = 1;
+			restore_dfl = true;
 	} else if (p->cursig == SIG_DFL) {
 		setsig(p, SIG_IGN, SS_RESTORE_CURR);
 		/* restore to SIG_DFL */
-		restore_dfl = 1;
+		restore_dfl = true;
 	}
 	return (restore_dfl);
 }
 
-/* Called by c_print() to undo whatever block_pipe() did */
+/* called by c_print() to undo whatever block_pipe() did */
 void
-restore_pipe(int restore_dfl)
+restore_pipe(void)
 {
-	if (restore_dfl)
-		setsig(&sigtraps[SIGPIPE], SIG_DFL, SS_RESTORE_CURR);
+	setsig(&sigtraps[SIGPIPE], SIG_DFL, SS_RESTORE_CURR);
 }
 
 /*

@@ -1,7 +1,7 @@
-# $MirOS: src/bin/mksh/Makefile,v 1.150 2016/07/25 21:05:19 tg Exp $
+# $MirOS: src/bin/mksh/Makefile,v 1.159 2017/04/28 00:33:15 tg Exp $
 #-
 # Copyright (c) 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010,
-#		2011, 2012, 2013, 2014, 2015, 2016
+#		2011, 2012, 2013, 2014, 2015, 2016, 2017
 #	mirabilos <m@mirbsd.org>
 #
 # Provided that these terms and disclaimer and all copyright notices
@@ -57,7 +57,7 @@ CPPFLAGS+=	-DMKSH_ASSUME_UTF8 -DMKSH_DISABLE_DEPRECATED \
 		-DHAVE_SETGROUPS=1 -DHAVE_STRERROR=0 -DHAVE_STRSIGNAL=0 \
 		-DHAVE_STRLCPY=1 -DHAVE_FLOCK_DECL=1 -DHAVE_REVOKE_DECL=1 \
 		-DHAVE_SYS_ERRLIST_DECL=1 -DHAVE_SYS_SIGLIST_DECL=1 \
-		-DHAVE_PERSISTENT_HISTORY=1 -DMKSH_BUILD_R=529
+		-DHAVE_PERSISTENT_HISTORY=1 -DMKSH_BUILD_R=551
 CPPFLAGS+=	-D${${PROG:L}_tf:C/(Mir${MAN:E}{0,1}){2}/4/:S/x/mksh_BUILD/:U}
 CPPFLAGS+=	-I.
 COPTS+=		-std=c89 -Wall
@@ -100,7 +100,7 @@ regress: ${PROG} check.pl check.t
 	echo export FNORD=666 >regress-dir/.mkshrc
 	HOME=$$(realpath regress-dir) perl ${SRCDIR}/check.pl \
 	    -s ${SRCDIR}/check.t -v -p ./${PROG} \
-	    -C shell:legacy-no,int:32,fastbox
+	    -C shell:legacy-no,int:32,shell:ebcdic-no,shell:ascii-yes,shell:textmode-no,shell:binmode-yes,fastbox
 
 TEST_BUILD_ENV:=	TARGET_OS= CPP=
 TEST_BUILD_ENV+=	HAVE_STRING_POOLING=0
@@ -135,6 +135,13 @@ distribution:
 	chown ${BINOWN}:${CONFGRP} ${DESTDIR}/etc/skel/.mkshrc
 	chmod 0644 ${DESTDIR}/etc/skel/.mkshrc
 
+.if make(cats) || make(clean) || make(cleandir)
+MAN=		lksh.1 mksh.1
+.endif
+CLEANFILES+=	${MANALL:S/.cat/.ps/} ${MAN:S/$/.pdf/} ${MANALL:S/$/.gz/}
+CLEANFILES+=	${MAN:S/$/.htm/} ${MAN:S/$/.htm.gz/}
+CLEANFILES+=	${MAN:S/$/.txt/} ${MAN:S/$/.txt.gz/}
+
 .include <bsd.prog.mk>
 
 .ifmake cats
@@ -145,16 +152,14 @@ V_GHOSTSCRIPT!=	pkg_info -e 'ghostscript-*'
 .  endif
 .endif
 
-CLEANFILES+=	${MANALL:S/.cat/.ps/} ${MAN:S/$/.pdf/} ${MANALL:S/$/.gz/}
-CLEANFILES+=	${MAN:S/$/.htm/} ${MAN:S/$/.htm.gz/}
-CLEANFILES+=	${MAN:S/$/.txt/} ${MAN:S/$/.txt.gz/}
-CATS_KW=	mksh, ksh, sh
+CATS_KW=	mksh, lksh, ksh, sh, Korn Shell, Android
+CATS_TITLE_lksh_1=lksh - Legacy Korn shell built on mksh
 CATS_TITLE_mksh_1=mksh - The MirBSD Korn Shell
 cats: ${MANALL} ${MANALL:S/.cat/.ps/}
 .if "${MANALL:Nlksh.cat1:Nmksh.cat1}" != ""
 .  error Adjust here.
 .endif
-.for _m _n in mksh 1
+.for _m _n in lksh 1 mksh 1
 	x=$$(ident ${SRCDIR:Q}/${_m}.${_n} | \
 	    awk '/Mir''OS:/ { print $$4$$5; }' | \
 	    tr -dc 0-9); (( $${#x} == 14 )) || exit 1; exec \
@@ -189,6 +194,9 @@ d: all
 dr:
 	p=$$(realpath ${PROG:Q}) && cd ${SRCDIR:Q} && exec ${MKSH} \
 	    ${BSDSRCDIR:Q}/contrib/hosted/tg/sdmksh "$$p"
+
+r:
+	cd ${.CURDIR:Q} && exec env ENV=/nonexistent PS1='% ' ${.OBJDIR:Q}/mksh
 
 repool:
 	cd ${.CURDIR:Q} && \

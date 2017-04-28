@@ -2,7 +2,7 @@
 
 /*-
  * Copyright (c) 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010,
- *		 2011, 2012, 2013, 2015, 2016
+ *		 2011, 2012, 2013, 2015, 2016, 2017
  *	mirabilos <m@mirbsd.org>
  *
  * Provided that these terms and disclaimer and all copyright notices
@@ -23,7 +23,7 @@
 
 #include "sh.h"
 
-__RCSID("$MirOS: src/bin/mksh/tree.c,v 1.86 2016/07/25 00:04:48 tg Exp $");
+__RCSID("$MirOS: src/bin/mksh/tree.c,v 1.91 2017/04/28 03:28:19 tg Exp $");
 
 #define INDENT	8
 
@@ -58,7 +58,7 @@ ptree(struct op *t, int indent, struct shf *shf)
 	case TCOM:
 		prevent_semicolon = false;
 		/* special-case 'var=<<EOF' (cf. exec.c:execute) */
-		if (
+		if (t->args &&
 		    /* we have zero arguments, i.e. no program to run */
 		    t->args[0] == NULL &&
 		    /* we have exactly one variable assignment */
@@ -86,6 +86,15 @@ ptree(struct op *t, int indent, struct shf *shf)
 			shf_puts("#no-vars# ", shf);
 		if (t->args) {
 			w = t->args;
+			if (*w && **w == CHAR) {
+				char *cp = wdstrip(*w++, WDS_TPUTS);
+
+				if (valid_alias_name(cp))
+					shf_putc('\\', shf);
+				shf_puts(cp, shf);
+				shf_putc(' ', shf);
+				afree(cp, ATEMP);
+			}
 			while (*w)
 				fptreef(shf, indent, Tf_S_, *w++);
 		} else
@@ -352,14 +361,18 @@ wdvarput(struct shf *shf, const char *wp, int quotelevel, int opmode)
 				}
 			shf_putc(c, shf);
 			break;
+		case COMASUB:
 		case COMSUB:
 			shf_puts("$(", shf);
 			cs = ")";
+			if (*wp == '(' /*)*/)
+				shf_putc(' ', shf);
  pSUB:
 			while ((c = *wp++) != 0)
 				shf_putc(c, shf);
 			shf_puts(cs, shf);
 			break;
+		case FUNASUB:
 		case FUNSUB:
 			c = ' ';
 			if (0)
@@ -409,8 +422,9 @@ wdvarput(struct shf *shf, const char *wp, int quotelevel, int opmode)
 		case SPAT:
 			c = '|';
 			if (0)
+				/* FALLTHROUGH */
 		case CPAT:
-				c = /*(*/ ')';
+			  c = /*(*/ ')';
 			shf_putc(c, shf);
 			break;
 		}
@@ -606,7 +620,9 @@ wdscan(const char *wp, int c)
 		case QCHAR:
 			wp++;
 			break;
+		case COMASUB:
 		case COMSUB:
+		case FUNASUB:
 		case FUNSUB:
 		case VALSUB:
 		case EXPRSUB:
@@ -782,13 +798,13 @@ vistree(char *dst, size_t sz, struct op *t)
 	if (--sz == 0 || (c = (unsigned char)(*cp++)) == 0)
 		/* NUL or not enough free space */
 		goto vist_out;
-	if (ISCTRL(c & 0x7F)) {
+	if (ksh_isctrl(c)) {
 		/* C0 or C1 control character or DEL */
 		if (--sz == 0)
 			/* not enough free space for two chars */
 			goto vist_out;
-		*dst++ = (c & 0x80) ? '$' : '^';
-		c = UNCTRL(c & 0x7F);
+		*dst++ = '^';
+		c = ksh_unctrl(c);
 	} else if (UTFMODE && c > 0x7F) {
 		/* better not try to display broken multibyte chars */
 		/* also go easy on the Unicode: no U+FFFD here */
@@ -806,10 +822,10 @@ vistree(char *dst, size_t sz, struct op *t)
 void
 dumpchar(struct shf *shf, int c)
 {
-	if (ISCTRL(c & 0x7F)) {
+	if (ksh_isctrl(c)) {
 		/* C0 or C1 control character or DEL */
-		shf_putc((c & 0x80) ? '$' : '^', shf);
-		c = UNCTRL(c & 0x7F);
+		shf_putc('^', shf);
+		c = ksh_unctrl(c);
 	}
 	shf_putc(c, shf);
 }
@@ -832,18 +848,22 @@ dumpwdvar_i(struct shf *shf, const char *wp, int quotelevel)
 			}
 			shf_puts("ADELIM=", shf);
 			if (0)
+				/* FALLTHROUGH */
 		case CHAR:
-				shf_puts("CHAR=", shf);
+			  shf_puts("CHAR=", shf);
 			dumpchar(shf, *wp++);
 			break;
 		case QCHAR:
 			shf_puts("QCHAR<", shf);
 			c = *wp++;
-			if (quotelevel == 0 ||
-			    (c == '"' || c == '`' || c == '$' || c == '\\'))
+			if (quotelevel == 0 || c == '"' || c == '\\' ||
+			    ctype(c, C_DOLAR | C_GRAVE))
 				shf_putc('\\', shf);
 			dumpchar(shf, c);
 			goto closeandout;
+		case COMASUB:
+			shf_puts("COMASUB<", shf);
+			goto dumpsub;
 		case COMSUB:
 			shf_puts("COMSUB<", shf);
  dumpsub:
@@ -852,6 +872,9 @@ dumpwdvar_i(struct shf *shf, const char *wp, int quotelevel)
  closeandout:
 			shf_putc('>', shf);
 			break;
+		case FUNASUB:
+			shf_puts("FUNASUB<", shf);
+			goto dumpsub;
 		case FUNSUB:
 			shf_puts("FUNSUB<", shf);
 			goto dumpsub;
