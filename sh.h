@@ -112,6 +112,13 @@
 #include <wchar.h>
 #endif
 
+/* monkey-patch known-bad offsetof versions to quell a warning */
+#if (defined(__KLIBC__) || defined(__dietlibc__)) && \
+    ((defined(__GNUC__) && (__GNUC__ > 3)) || defined(__NWCC__))
+#undef offsetof
+#define offsetof(s, e)		__builtin_offsetof(s, e)
+#endif
+
 #undef __attribute__
 #if HAVE_ATTRIBUTE_BOUNDED
 #define MKSH_A_BOUNDED(x,y,z)	__attribute__((__bounded__(x, y, z)))
@@ -175,9 +182,9 @@
 #endif
 
 #ifdef EXTERN
-__RCSID("$MirOS: src/bin/mksh/sh.h,v 1.827 2017/04/28 03:51:13 tg Exp $");
+__RCSID("$MirOS: src/bin/mksh/sh.h,v 1.841 2017/08/29 13:38:31 tg Exp $");
 #endif
-#define MKSH_VERSION "R55 2017/04/27"
+#define MKSH_VERSION "R56 2017/08/29"
 
 /* arithmetic types: C implementation */
 #if !HAVE_CAN_INTTYPES
@@ -258,6 +265,8 @@ typedef MKSH_TYPEDEF_SSIZE_T ssize_t;
 #ifndef MKSH_INCLUDES_ONLY
 
 /* EBCDIC fun */
+
+/* see the large comment in shf.c for an EBCDIC primer */
 
 #if defined(MKSH_FOR_Z_OS) && defined(__MVS__) && defined(__IBMC__) && defined(__CHARSET_LIB)
 # if !__CHARSET_LIB && !defined(MKSH_EBCDIC)
@@ -629,15 +638,12 @@ char *ucstrstr(char *, const char *);
 #endif
 
 #if defined(DEBUG) || defined(__COVERITY__)
-#define mkssert(e)	do { if (!(e)) exit(255); } while (/* CONSTCOND */ 0)
 #ifndef DEBUG_LEAKS
 #define DEBUG_LEAKS
 #endif
-#else
-#define mkssert(e)	do { } while (/* CONSTCOND */ 0)
 #endif
 
-#if (!defined(MKSH_BUILDMAKEFILE4BSD) && !defined(MKSH_BUILDSH)) || (MKSH_BUILD_R != 551)
+#if (!defined(MKSH_BUILDMAKEFILE4BSD) && !defined(MKSH_BUILDSH)) || (MKSH_BUILD_R != 562)
 #error Must run Build.sh to compile this.
 extern void thiswillneverbedefinedIhope(void);
 int
@@ -649,7 +655,7 @@ im_sorry_dave(void)
 #endif
 
 /* use this ipv strchr(s, 0) but no side effects in s! */
-#define strnul(s)	((s) + strlen(s))
+#define strnul(s)	((s) + strlen((const void *)s))
 
 #define utf_ptradjx(src, dst) do {					\
 	(dst) = (src) + utf_ptradj(src);				\
@@ -665,7 +671,7 @@ im_sorry_dave(void)
 #else
 /* be careful to evaluate arguments only once! */
 #define strdupx(d, s, ap) do {						\
-	const char *strdup_src = (s);					\
+	const char *strdup_src = (const void *)(s);			\
 	char *strdup_dst = NULL;					\
 									\
 	if (strdup_src != NULL) {					\
@@ -676,7 +682,7 @@ im_sorry_dave(void)
 	(d) = strdup_dst;						\
 } while (/* CONSTCOND */ 0)
 #define strndupx(d, s, n, ap) do {					\
-	const char *strdup_src = (s);					\
+	const char *strdup_src = (const void *)(s);			\
 	char *strdup_dst = NULL;					\
 									\
 	if (strdup_src != NULL) {					\
@@ -700,11 +706,6 @@ im_sorry_dave(void)
 
 #ifndef MKSH_S_NOVI
 #define MKSH_S_NOVI		0
-#endif
-
-#ifdef MKSH_EBCDIC
-#undef MKSH_S_NOVI
-#define MKSH_S_NOVI		1
 #endif
 
 #if defined(MKSH_NOPROSPECTOFWORK) && !defined(MKSH_UNEMPLOYED)
@@ -802,8 +803,8 @@ enum sh_flag {
 struct sretrace_info;
 struct yyrecursive_state;
 
-EXTERN struct sretrace_info *retrace_info E_INIT(NULL);
-EXTERN int subshell_nesting_type E_INIT(0);
+EXTERN struct sretrace_info *retrace_info;
+EXTERN int subshell_nesting_type;
 
 extern struct env {
 	ALLOC_ITEM alloc_INT;	/* internal, do not touch */
@@ -1326,7 +1327,7 @@ enum tmout_enum {
 	TMOUT_LEAVING		/* have timed out */
 };
 EXTERN unsigned int ksh_tmout;
-EXTERN enum tmout_enum ksh_tmout_state E_INIT(TMOUT_EXECUTING);
+EXTERN enum tmout_enum ksh_tmout_state;
 
 /* For "You have stopped jobs" message */
 EXTERN bool really_exit;
@@ -1391,6 +1392,8 @@ EXTERN char ifs0;
 #define C_ALPHA	(CiLOWER | CiUPPER)
 /* A‥Z_a‥z		alphabetical plus underscore (identifier lead) */
 #define C_ALPHX	(CiLOWER | CiUNDER | CiUPPER)
+/* \x01‥\x7F		7-bit ASCII except NUL */
+#define C_ASCII (CiALIAS | CiANGLE | CiBRACK | CiCNTRL | CiCOLON | CiCR | CiCURLY | CiDIGIT | CiEQUAL | CiGRAVE | CiHASH | CiLOWER | CiMINUS | CiNL | CiOCTAL | CiPERCT | CiPLUS | CiQC | CiQCL | CiQCM | CiQCX | CiQUEST | CiSP | CiSPX | CiSS | CiTAB | CiUNDER | CiUPPER)
 /* \x09\x20		tab and space */
 #define C_BLANK	(CiSP | CiTAB)
 /* \x09\x20"'		separator for completion */
@@ -1467,7 +1470,7 @@ EXTERN char ifs0;
 
 /* identity transform of octet */
 #define ord(c)		((unsigned int)(unsigned char)(c))
-#ifdef MKSH_EBCDIC
+#if defined(MKSH_EBCDIC) || defined(MKSH_FAUX_EBCDIC)
 EXTERN unsigned short ebcdic_map[256];
 EXTERN unsigned char ebcdic_rtt_toascii[256];
 EXTERN unsigned char ebcdic_rtt_fromascii[256];
@@ -1477,19 +1480,22 @@ extern void ebcdic_init(void);
 /* two-way round-trip conversion, for general use */
 #define rtt2asc(c)	ebcdic_rtt_toascii[(unsigned char)(c)]
 #define asc2rtt(c)	ebcdic_rtt_fromascii[(unsigned char)(c)]
-/* control character foo */
-#define ksh_isctrl(c)	(ord(c) < 0x40 || ord(c) == 0xFF)
 /* case-independent char comparison */
 #define ksh_eq(c,u,l)	(ord(c) == ord(u) || ord(c) == ord(l))
 #else
 #define asciibetical(c)	ord(c)
 #define rtt2asc(c)	((unsigned char)(c))
 #define asc2rtt(c)	((unsigned char)(c))
-#define ksh_isctrl(c)	(((c) & 0x7F) < 0x20 || (c) == 0x7F)
 #define ksh_eq(c,u,l)	((ord(c) | 0x20) == ord(l))
 #endif
+/* control character foo */
+#ifdef MKSH_EBCDIC
+#define ksh_isctrl(c)	(ord(c) < 0x40 || ord(c) == 0xFF)
+#else
+#define ksh_isctrl(c)	((ord(c) & 0x7F) < 0x20 || (c) == 0x7F)
+#endif
 /* new fast character classes */
-#define ctype(c,t)	tobool(ksh_ctypes[rtt2asc(c)] & (t))
+#define ctype(c,t)	tobool(ksh_ctypes[ord(c)] & (t))
 /* helper functions */
 #define ksh_isdash(s)	tobool(ord((s)[0]) == '-' && ord((s)[1]) == '\0')
 /* invariant distance even in EBCDIC */
@@ -2174,76 +2180,76 @@ typedef union {
 #define HERES		10	/* max number of << in line */
 
 #ifdef MKSH_EBCDIC
-#define CTRL_AT	0x00
-#define CTRL_A	0x01
-#define CTRL_B	0x02
-#define CTRL_C	0x03
-#define CTRL_D	0x37
-#define CTRL_E	0x2D
-#define CTRL_F	0x2E
-#define CTRL_G	0x2F
-#define CTRL_H	0x16
-#define CTRL_I	0x05
-#define CTRL_J	0x15
-#define CTRL_K	0x0B
-#define CTRL_L	0x0C
-#define CTRL_M	0x0D
-#define CTRL_N	0x0E
-#define CTRL_O	0x0F
-#define CTRL_P	0x10
-#define CTRL_Q	0x11
-#define CTRL_R	0x12
-#define CTRL_S	0x13
-#define CTRL_T	0x3C
-#define CTRL_U	0x3D
-#define CTRL_V	0x32
-#define CTRL_W	0x26
-#define CTRL_X	0x18
-#define CTRL_Y	0x19
-#define CTRL_Z	0x3F
-#define CTRL_BO	0x27
-#define CTRL_BK	0x1C
-#define CTRL_BC	0x1D
-#define CTRL_CA	0x1E
-#define CTRL_US	0x1F
-#define CTRL_QM	0x07
+#define CTRL_AT	(0x00U)
+#define CTRL_A	(0x01U)
+#define CTRL_B	(0x02U)
+#define CTRL_C	(0x03U)
+#define CTRL_D	(0x37U)
+#define CTRL_E	(0x2DU)
+#define CTRL_F	(0x2EU)
+#define CTRL_G	(0x2FU)
+#define CTRL_H	(0x16U)
+#define CTRL_I	(0x05U)
+#define CTRL_J	(0x15U)
+#define CTRL_K	(0x0BU)
+#define CTRL_L	(0x0CU)
+#define CTRL_M	(0x0DU)
+#define CTRL_N	(0x0EU)
+#define CTRL_O	(0x0FU)
+#define CTRL_P	(0x10U)
+#define CTRL_Q	(0x11U)
+#define CTRL_R	(0x12U)
+#define CTRL_S	(0x13U)
+#define CTRL_T	(0x3CU)
+#define CTRL_U	(0x3DU)
+#define CTRL_V	(0x32U)
+#define CTRL_W	(0x26U)
+#define CTRL_X	(0x18U)
+#define CTRL_Y	(0x19U)
+#define CTRL_Z	(0x3FU)
+#define CTRL_BO	(0x27U)
+#define CTRL_BK	(0x1CU)
+#define CTRL_BC	(0x1DU)
+#define CTRL_CA	(0x1EU)
+#define CTRL_US	(0x1FU)
+#define CTRL_QM	(0x07U)
 #else
-#define CTRL_AT	0x00
-#define CTRL_A	0x01
-#define CTRL_B	0x02
-#define CTRL_C	0x03
-#define CTRL_D	0x04
-#define CTRL_E	0x05
-#define CTRL_F	0x06
-#define CTRL_G	0x07
-#define CTRL_H	0x08
-#define CTRL_I	0x09
-#define CTRL_J	0x0A
-#define CTRL_K	0x0B
-#define CTRL_L	0x0C
-#define CTRL_M	0x0D
-#define CTRL_N	0x0E
-#define CTRL_O	0x0F
-#define CTRL_P	0x10
-#define CTRL_Q	0x11
-#define CTRL_R	0x12
-#define CTRL_S	0x13
-#define CTRL_T	0x14
-#define CTRL_U	0x15
-#define CTRL_V	0x16
-#define CTRL_W	0x17
-#define CTRL_X	0x18
-#define CTRL_Y	0x19
-#define CTRL_Z	0x1A
-#define CTRL_BO	0x1B
-#define CTRL_BK	0x1C
-#define CTRL_BC	0x1D
-#define CTRL_CA	0x1E
-#define CTRL_US	0x1F
-#define CTRL_QM	0x7F
+#define CTRL_AT	(0x00U)
+#define CTRL_A	(0x01U)
+#define CTRL_B	(0x02U)
+#define CTRL_C	(0x03U)
+#define CTRL_D	(0x04U)
+#define CTRL_E	(0x05U)
+#define CTRL_F	(0x06U)
+#define CTRL_G	(0x07U)
+#define CTRL_H	(0x08U)
+#define CTRL_I	(0x09U)
+#define CTRL_J	(0x0AU)
+#define CTRL_K	(0x0BU)
+#define CTRL_L	(0x0CU)
+#define CTRL_M	(0x0DU)
+#define CTRL_N	(0x0EU)
+#define CTRL_O	(0x0FU)
+#define CTRL_P	(0x10U)
+#define CTRL_Q	(0x11U)
+#define CTRL_R	(0x12U)
+#define CTRL_S	(0x13U)
+#define CTRL_T	(0x14U)
+#define CTRL_U	(0x15U)
+#define CTRL_V	(0x16U)
+#define CTRL_W	(0x17U)
+#define CTRL_X	(0x18U)
+#define CTRL_Y	(0x19U)
+#define CTRL_Z	(0x1AU)
+#define CTRL_BO	(0x1BU)
+#define CTRL_BK	(0x1CU)
+#define CTRL_BC	(0x1DU)
+#define CTRL_CA	(0x1EU)
+#define CTRL_US	(0x1FU)
+#define CTRL_QM	(0x7FU)
 #endif
 
-#define IDENT		64
+#define IDENT	64
 
 EXTERN Source *source;		/* yyparse/yylex source */
 EXTERN YYSTYPE yylval;		/* result from yylex */
@@ -2528,7 +2534,7 @@ void change_xtrace(unsigned char, bool);
 int parse_args(const char **, int, bool *);
 int getn(const char *, int *);
 int gmatchx(const char *, const char *, bool);
-int has_globbing(const char *, const char *) MKSH_A_PURE;
+bool has_globbing(const char *) MKSH_A_PURE;
 int ascstrcmp(const void *, const void *) MKSH_A_PURE;
 int ascpstrcmp(const void *, const void *) MKSH_A_PURE;
 void ksh_getopt_reset(Getopt *, int);
